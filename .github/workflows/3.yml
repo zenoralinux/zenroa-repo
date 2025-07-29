@@ -96,8 +96,8 @@ jobs:
           repo-add -n -R "$REPO_NAME".db.tar.gz "${pkgs[@]}"
 
           # کپی واقعی برای سازگاری با GitHub Releases و pacman
-          cp -f "$REPO_NAME".db.tar.gz    "$REPO_NAME".db
-          cp -f "$REPO_NAME".files.tar.gz "$REPO_NAME".files
+          mv -f "$REPO_NAME".db.tar.gz    "$REPO_NAME".db
+          mv -f "$REPO_NAME".files.tar.gz "$REPO_NAME".files
 
           echo "== DB outputs =="
           ls -lh "$REPO_NAME".db* "$REPO_NAME".files*
