@@ -80,7 +80,7 @@ jobs:
 
           ls -lh "$REPO".db* "$REPO".files* || true
 
-      - name: Create/Update Release (tag: repo)
+      - name: Create/Update Release 
         uses: softprops/action-gh-release@v2
         with:
           tag_name: repo
