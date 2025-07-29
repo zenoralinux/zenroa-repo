@@ -48,7 +48,7 @@ jobs:
           mkdir -p mirror-src
           mkdir -p "${{ github.workspace }}/$TARGET_DIR"
         env:
-          TARGET_DIR: ${{ github.event.inputs.target_dir || 'external/zenora-repo' }}
+          TARGET_DIR: ${{ github.event.inputs.target_dir || '/' }}
 
       - name: Clone source (Codeberg)
         run: |
