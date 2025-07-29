@@ -74,7 +74,7 @@ jobs:
           echo "Built:"
           ls -lh "$REPO".db* "$REPO".files* | cat
 
-      - name: Create/Update Release (tag: repo)
+      - name: Create/Update Release repo
         uses: softprops/action-gh-release@v2
         with:
           tag_name: repo
