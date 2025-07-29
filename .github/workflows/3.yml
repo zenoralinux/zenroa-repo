@@ -95,8 +95,8 @@ jobs:
           repo-add -n -R "$REPO_NAME".db.tar.gz "${pkgs[@]}"
 
           # Keep BOTH compressed and uncompressed-named copies (no symlink)
-          cp -f "$REPO_NAME".db.tar.gz    "$REPO_NAME".db
-          cp -f "$REPO_NAME".files.tar.gz "$REPO_NAME".files
+          mv -f "$REPO_NAME".db.tar.gz    "$REPO_NAME".db
+          mv -f "$REPO_NAME".files.tar.gz "$REPO_NAME".files
 
           echo "== DB outputs =="
           ls -lh "$REPO_NAME".db* "$REPO_NAME".files*
