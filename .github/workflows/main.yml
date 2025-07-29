@@ -1,4 +1,4 @@
-name: Mirror Codeberg Repo into This Repo
+name: Mirror Codeberg Repo into This Repo (with LFS)
 
 on:
   workflow_dispatch:
@@ -20,7 +20,6 @@ on:
         required: false
         default: ""
   schedule:
-    # هر روز ساعت 03:30 (به وقت UTC). اگر خواستید عوضش کنید.
     - cron: "30 3 * * *"
 
 permissions:
@@ -33,12 +32,11 @@ concurrency:
 jobs:
   mirror:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout this repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # برای ایجاد کامیت و مقایسه تغییرات بهتر است تاریخچه کامل باشد
+          fetch-depth: 0
 
       - name: Set up Git identity
         run: |
@@ -54,7 +52,6 @@ jobs:
 
       - name: Clone source (Codeberg)
         run: |
-          # اگر خصوصی است، از URL احراز هویت‌شده استفاده کنید (راهنما در انتهای فایل)
           git clone --no-tags --depth 1 --branch "$SRC_BRANCH" "$SRC_URL" mirror-src
         env:
           SRC_URL: ${{ github.event.inputs.source_repo_url || 'https://codeberg.org/zenoralinux/zenora-repo.git' }}
@@ -63,28 +60,40 @@ jobs:
       - name: Mirror files into target directory
         run: |
           TARGET_DIR="${{ github.event.inputs.target_dir || 'external/zenora-repo' }}"
-          # همسان‌سازی کامل با حذف فایل‌های قدیمی. .git و چند الگوی رایج نادیده می‌شوند.
           rsync -a --delete \
             --exclude='.git' \
             --exclude='.github/workflows/mirror-codeberg.yml' \
             mirror-src/ "$TARGET_DIR/"
 
-          # اگر تغییری وجود داشت، کامیت کن
-          if [[ -n "$(git status --porcelain "$TARGET_DIR")" ]]; then
+      # --- فعال‌سازی و تنظیم LFS قبل از git add ---
+      - name: Enable and configure Git LFS
+        run: |
+          git lfs install
+          # الگوهای فایل‌های حجیم مورد استفاده در ریپوی شما را اینجا اضافه/کم یا زیاد کنید
+          git lfs track "*.pkg.tar.zst"
+          git lfs track "*.pkg.tar.xz"
+          git lfs track "*.deb"
+          git lfs track "*.AppImage"
+          git add .gitattributes
+
+      - name: Commit & push (with LFS pointers)
+        run: |
+          TARGET_DIR="${{ github.event.inputs.target_dir || 'external/zenora-repo' }}"
+          if [[ -n "$(git status --porcelain "$TARGET_DIR" .gitattributes)" ]]; then
             git add "$TARGET_DIR"
             if [[ -n "${{ github.event.inputs.commit_message }}" ]]; then
               git commit -m "${{ github.event.inputs.commit_message }}"
             else
-              git commit -m "chore(mirror): sync from Codeberg $SRC_URL@$SRC_BRANCH → $TARGET_DIR"
+              git commit -m "chore(mirror): sync from $SRC_URL@$SRC_BRANCH → $TARGET_DIR (LFS)"
             fi
             git push
           else
             echo "No changes to commit."
           fi
-        shell: bash
+        env:
+          SRC_URL: ${{ github.event.inputs.source_repo_url || 'https://codeberg.org/zenoralinux/zenora-repo.git' }}
+          SRC_BRANCH: ${{ github.event.inputs.source_branch || 'main' }}
 
       - name: Show summary
         run: |
-          echo "✅ Mirror completed."
-          echo "Source: ${{ github.event.inputs.source_repo_url || 'https://codeberg.org/zenoralinux/zenora-repo.git' }}@${{ github.event.inputs.source_branch || 'main' }}"
-          echo "Target dir: ${{ github.event.inputs.target_dir || 'external/zenora-repo' }}"
+          echo "✅ Mirror completed with Git LFS."
