@@ -117,7 +117,7 @@ jobs:
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ env.RELEASE_TAG_BASE }}-${{ env.ARCH_DIR }}
+          tag: r${{ env.ARCH_DIR }}
           release_name: "Package repository (rolling) ${{ env.ARCH_DIR }}"
           body: "Automated publish for ${{ env.REPO_NAME }} / ${{ env.ARCH_DIR }}"
           file_glob: true
