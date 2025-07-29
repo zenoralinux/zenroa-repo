@@ -1,4 +1,4 @@
-name: Publish Arch Repo to GitHub Releases (fixed tag)
+name: Publish Arch Repo to GitHub Releases (fixed tag, multi-arch)
 
 on:
   workflow_dispatch:
@@ -12,28 +12,41 @@ on:
         required: true
         default: "main"
       repo_name:
-        description: "Pacman repo/db name (MUST match pacman.conf section)"
+        description: "Pacman repo/db name (MUST match pacman.conf section on clients)"
         required: true
-        default: "zrepo"          # ← اگر در کلاینت [zrepo] می‌نویسی، این هم zrepo باشد
-      arch_dir:
-        description: "Architecture subdir to publish"
-        required: true
-        default: "x86_64"
+        default: "zrepo"          # اگر سمت کلاینت [zrepo] می‌گذاری، اینجا هم zrepo باشد
       release_tag:
         description: "Fixed release tag to upload assets to"
         required: true
-        default: "repository"     # ← مشابه نمونه‌ای که دیدی
+        default: "repository"     # مشابه نمونه‌ای که دیدی
   schedule:
-    - cron: "30 3 * * *"
+    - cron: "30 3 * * *"         # هر روز ساعت 03:30 UTC
 
 permissions:
   contents: write
 
+concurrency:
+  group: publish-arch-repo
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # اجرای کل Job داخل Arch Linux تا repo-add موجود باشد
     container:
       image: archlinux:latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        arch_dir: [x86_64, aarch64]   # اگر فقط یکی را می‌خواهی، لیست را تغییر بده
+
+    env:
+      REPO_NAME: ${{ github.event.inputs.repo_name }}
+      SRC_URL: ${{ github.event.inputs.source_repo_url }}
+      SRC_BRANCH: ${{ github.event.inputs.source_branch }}
+      RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+      ARCH_DIR: ${{ matrix.arch_dir }}
 
     steps:
       - name: Install base tools (inside Arch container)
@@ -49,56 +62,78 @@ jobs:
 
       - name: Fetch source packages
         run: |
+          set -eux
           git clone --depth 1 --branch "$SRC_BRANCH" "$SRC_URL" src
-        env:
-          SRC_URL: ${{ github.event.inputs.source_repo_url }}
-          SRC_BRANCH: ${{ github.event.inputs.source_branch }}
+          test -d "src" && ls -la src || true
+          test -d "src/$ARCH_DIR" && ls -la "src/$ARCH_DIR" || echo "No src/$ARCH_DIR folder."
 
       - name: Prepare repo structure
         run: |
           set -euo pipefail
-          REPO="${{ github.event.inputs.repo_name }}"
-          ARCH_DIR="${{ github.event.inputs.arch_dir }}"
-          mkdir -p repo/$ARCH_DIR
-          # فقط بسته‌ها را کپی کن
-          find "src/$ARCH_DIR" -maxdepth 1 -type f -name "*.pkg.tar.*" -print -exec cp -f {} "repo/$ARCH_DIR/" \;
+          mkdir -p "repo/$ARCH_DIR"
+          # فقط فایل‌های بسته را کپی کن (اگر وجود دارند)
+          if compgen -G "src/$ARCH_DIR/*.pkg.tar.*" > /dev/null; then
+            cp -f src/$ARCH_DIR/*.pkg.tar.* "repo/$ARCH_DIR/" || true
+          fi
 
       - name: Build pacman database (repo-add)
         run: |
           set -euo pipefail
-          REPO="${{ github.event.inputs.repo_name }}"
-          ARCH_DIR="${{ github.event.inputs.arch_dir }}"
           cd "repo/$ARCH_DIR"
 
-          rm -f "$REPO".db* "$REPO".files*
+          # اگر هیچ بسته‌ای وجود ندارد، Fail شفاف بده
+          shopt -s nullglob
+          pkgs=( *.pkg.tar.* )
+          if [ ${#pkgs[@]} -eq 0 ]; then
+            echo "::error::No *.pkg.tar.* files found in repo/$ARCH_DIR – cannot build database for $REPO_NAME."
+            echo "Make sure the upstream repo has packages under $ARCH_DIR."
+            exit 1
+          fi
 
-          repo-add -n -R "$REPO".db.tar.gz ./*.pkg.tar.*
+          rm -f "$REPO_NAME".db* "$REPO_NAME".files*
 
-          # کپی واقعی (نه symlink)
-          mv -f "$REPO".db.tar.gz    "$REPO".db
-          mv -f "$REPO".files.tar.gz "$REPO".files
+          # ساخت دیتابیس
+          repo-add -n -R "$REPO_NAME".db.tar.gz "${pkgs[@]}"
 
-          ls -lh "$REPO".db* "$REPO".files* || true
+          # کپی واقعی برای سازگاری با GitHub Releases و pacman
+          cp -f "$REPO_NAME".db.tar.gz    "$REPO_NAME".db
+          cp -f "$REPO_NAME".files.tar.gz "$REPO_NAME".files
 
-      # برای اطمینان از جایگزینی فایل‌های قدیمی از اکشن زیر استفاده می‌کنیم
+          echo "== DB outputs =="
+          ls -lh "$REPO_NAME".db* "$REPO_NAME".files*
+
+      - name: List repo outputs
+        run: |
+          set -e
+          echo "Workspace: $GITHUB_WORKSPACE"
+          ls -lah
+          echo "---- repo tree ----"
+          ls -lahR repo || true
+          echo "---- expected files ----"
+          find "repo/$ARCH_DIR" -maxdepth 1 -type f \( -name "*.pkg.tar.*" -o -name "$REPO_NAME.db*" -o -name "$REPO_NAME.files*" \) -print || true
+
+      - name: Guard – fail if nothing to upload
+        run: |
+          set -e
+          cnt=$(find "repo/$ARCH_DIR" -maxdepth 1 -type f \( -name "*.pkg.tar.*" -o -name "$REPO_NAME.db*" -o -name "$REPO_NAME.files*" \) | wc -l)
+          if [ "$cnt" -eq 0 ]; then
+            echo "::error::No packages or database files found to upload under repo/$ARCH_DIR."
+            exit 1
+          fi
+
+      # آپلود روی یک تگ ثابت؛ overwrite: true تا همیشه جایگزین شود
       - name: Upload assets to fixed tag
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ github.event.inputs.release_tag }}
+          tag: ${{ env.RELEASE_TAG }}
           release_name: "Package repository (rolling)"
-          body: "Automated repo publish for ${{ github.event.inputs.repo_name }} / ${{ github.event.inputs.arch_dir }}"
+          body: "Automated publish for ${{ env.REPO_NAME }} / ${{ env.ARCH_DIR }}"
           file_glob: true
           overwrite: true
           file: |
-            repo/${{ github.event.inputs.arch_dir }}/*.pkg.tar.*
-            repo/${{ github.event.inputs.arch_dir }}/${{ github.event.inputs.repo_name }}.db*
-            repo/${{ github.event.inputs.arch_dir }}/${{ github.event.inputs.repo_name }}.files*
-
-      - name: Summary
-        run: |
-          echo "✅ Published to tag: ${{ github.event.inputs.release_tag }}"
-          echo "Client pacman.conf example:"
-          echo "[${{ github.event.inputs.repo_name }}]"
-          echo "SigLevel = Optional TrustAll"
-          echo "Server = https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.release_tag }}"
+            ${{ github.workspace }}/repo/${{ env.ARCH_DIR }}/*.pkg.tar.*
+            ${{ github.workspace }}/repo/${{ env.ARCH_DIR }}/${{ env.REPO_NAME }}.db
+            ${{ github.workspace }}/repo/${{ env.ARCH_DIR }}/${{ env.REPO_NAME }}.db.tar.gz
+            ${{ github.workspace }}/repo/${{ env.ARCH_DIR }}/${{ env.REPO_NAME }}.files
+            ${{ github.workspace }}/repo/${{ env.ARCH_DIR }}/${{ env.REPO_NAME }}.files.tar.gz
