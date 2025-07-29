@@ -1,4 +1,4 @@
-name: Mirror Codeberg Repo into This Repo (with LFS)
+name: Build & Publish Arch Repo to GitHub Releases
 
 on:
   workflow_dispatch:
@@ -8,92 +8,90 @@ on:
         required: true
         default: "https://codeberg.org/zenoralinux/zenora-repo.git"
       source_branch:
-        description: "Source branch on Codeberg"
+        description: "Source branch"
         required: true
         default: "main"
-      target_dir:
-        description: "Target subdirectory in this repo"
+      repo_name:
+        description: "Pacman repo name (e.g., zenora)"
         required: true
-        default: "external/zenora-repo"
-      commit_message:
-        description: "Custom commit message (optional)"
-        required: false
-        default: ""
+        default: "zenora"
+      arch_dir:
+        description: "Architecture subdir to publish (e.g., x86_64)"
+        required: true
+        default: "x86_64"
   schedule:
     - cron: "30 3 * * *"
 
 permissions:
   contents: write
 
-concurrency:
-  group: mirror-codeberg
-  cancel-in-progress: false
-
 jobs:
-  mirror:
+  publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout this repo
+      - name: Checkout (this repo)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set up Git identity
+      - name: Install pacman tools
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          sudo apt-get update
+          sudo apt-get install -y arch-install-scripts bsdtar
 
-      - name: Prepare workspace
+      - name: Fetch source packages from Codeberg
         run: |
-          mkdir -p mirror-src
-          mkdir -p "${{ github.workspace }}/$TARGET_DIR"
-        env:
-          TARGET_DIR: ${{ github.event.inputs.target_dir || '/' }}
-
-      - name: Clone source (Codeberg)
-        run: |
-          git clone --no-tags --depth 1 --branch "$SRC_BRANCH" "$SRC_URL" mirror-src
+          git clone --depth 1 --branch "$SRC_BRANCH" "$SRC_URL" src
         env:
           SRC_URL: ${{ github.event.inputs.source_repo_url || 'https://codeberg.org/zenoralinux/zenora-repo.git' }}
           SRC_BRANCH: ${{ github.event.inputs.source_branch || 'main' }}
 
-      - name: Mirror files into target directory
+      - name: Prepare repo structure
         run: |
-          TARGET_DIR="${{ github.event.inputs.target_dir || '/' }}"
-          rsync -a --delete \
-            --exclude='.git' \
-            --exclude='.github/workflows/mirror-codeberg.yml' \
-            mirror-src/ "$TARGET_DIR/"
+          REPO="${{ github.event.inputs.repo_name || 'zenora' }}"
+          ARCH_DIR="${{ github.event.inputs.arch_dir || 'x86_64' }}"
+          mkdir -p repo/$ARCH_DIR
+          # فقط فایل‌های بسته را کپی کن؛ چیزهای دیگر حذف می‌شوند تا دیتابیس تمیز بسازیم
+          find src/$ARCH_DIR -maxdepth 1 -type f -name "*.pkg.tar.*" -print -exec cp -f {} repo/$ARCH_DIR/ \;
 
-      # --- فعال‌سازی و تنظیم LFS قبل از git add ---
-      - name: Enable and configure Git LFS
+      - name: Build pacman database (repo-add)
         run: |
-          git lfs install
-          # الگوهای فایل‌های حجیم مورد استفاده در ریپوی شما را اینجا اضافه/کم یا زیاد کنید
-          git lfs track "*.pkg.tar.zst"
-          git lfs track "*.pkg.tar.xz"
-          git lfs track "*.deb"
-          git lfs track "*.AppImage"
-          git add .gitattributes
+          set -euo pipefail
+          REPO="${{ github.event.inputs.repo_name || 'zenora' }}"
+          ARCH_DIR="${{ github.event.inputs.arch_dir || 'x86_64' }}"
+          cd repo/$ARCH_DIR
 
-      - name: Commit & push (with LFS pointers)
-        run: |
-          TARGET_DIR="${{ github.event.inputs.target_dir || '/' }}"
-          if [[ -n "$(git status --porcelain "$TARGET_DIR" .gitattributes)" ]]; then
-            git add "$TARGET_DIR"
-            if [[ -n "${{ github.event.inputs.commit_message }}" ]]; then
-              git commit -m "${{ github.event.inputs.commit_message }}"
-            else
-              git commit -m "chore(mirror): sync from $SRC_URL@$SRC_BRANCH → $TARGET_DIR (LFS)"
-            fi
-            git push
-          else
-            echo "No changes to commit."
-          fi
+          # حذف دیتابیس‌های قدیمی
+          rm -f "$REPO".db* "$REPO".files*
+
+          # افزودن همه بسته‌ها به دیتابیس
+          repo-add -n -R "$REPO".db.tar.gz ./*.pkg.tar.*
+
+          # برای سازگاری بیشتر، لینک یا کپی بدون پسوند .tar.gz ایجاد کن
+          ln -sf "$REPO".db.tar.gz "$REPO".db
+          ln -sf "$REPO".files.tar.gz "$REPO".files
+
+          echo "Built:"
+          ls -lh "$REPO".db* "$REPO".files* | cat
+
+      - name: Create/Update Release (tag: repo)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: repo
+          name: "Zenora repo (rolling)"
+          draft: false
+          prerelease: false
+          files: |
+            repo/${{ github.event.inputs.arch_dir || 'x86_64' }}/*.pkg.tar.*
+            repo/${{ github.event.inputs.arch_dir || 'x86_64' }}/${{ github.event.inputs.repo_name || 'zenora' }}.db*
+            repo/${{ github.event.inputs.arch_dir || 'x86_64' }}/${{ github.event.inputs.repo_name || 'zenora' }}.files*
         env:
-          SRC_URL: ${{ github.event.inputs.source_repo_url || 'https://codeberg.org/zenoralinux/zenora-repo.git' }}
-          SRC_BRANCH: ${{ github.event.inputs.source_branch || 'main' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Show summary
+      - name: Summary
         run: |
-          echo "✅ Mirror completed with Git LFS."
+          echo "✅ Published pacman repo to GitHub Releases (tag: repo)."
+          echo "Client pacman.conf:"
+          echo "[${{ github.event.inputs.repo_name || 'zenora' }}]"
+          echo "SigLevel = Optional TrustAll"
+          echo "Server = https://github.com/${{ github.repository }}/releases/latest/download"
