@@ -75,8 +75,8 @@ jobs:
           repo-add -n -R "$REPO".db.tar.gz ./*.pkg.tar.*
 
           # کپی واقعی (نه symlink)
-          cp -f "$REPO".db.tar.gz    "$REPO".db
-          cp -f "$REPO".files.tar.gz "$REPO".files
+          mv -f "$REPO".db.tar.gz    "$REPO".db
+          mv -f "$REPO".files.tar.gz "$REPO".files
 
           ls -lh "$REPO".db* "$REPO".files* || true
 
