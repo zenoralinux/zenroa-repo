@@ -1,0 +1,6 @@
+git config --global user.name "zenoralinux" 
+git config --global user.email "miladalizade8282@gmail.com"
+git add .
+git commit -m "new"
+git push origin main
+

@@ -1,0 +1,10 @@
+#!/bin/bash
+
+#set -x
+
+
+rm zrepo.db zrepo.files
+repo-add zrepo.db.tar.gz *pkg.tar.zst
+
+mv zrepo.files.tar.gz zrepo.files
+mv zrepo.db.tar.gz zrepo.db
