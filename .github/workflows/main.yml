@@ -59,7 +59,7 @@ jobs:
 
       - name: Mirror files into target directory
         run: |
-          TARGET_DIR="${{ github.event.inputs.target_dir || 'external/zenora-repo' }}"
+          TARGET_DIR="${{ github.event.inputs.target_dir || '/' }}"
           rsync -a --delete \
             --exclude='.git' \
             --exclude='.github/workflows/mirror-codeberg.yml' \
@@ -78,7 +78,7 @@ jobs:
 
       - name: Commit & push (with LFS pointers)
         run: |
-          TARGET_DIR="${{ github.event.inputs.target_dir || 'external/zenora-repo' }}"
+          TARGET_DIR="${{ github.event.inputs.target_dir || '/' }}"
           if [[ -n "$(git status --porcelain "$TARGET_DIR" .gitattributes)" ]]; then
             git add "$TARGET_DIR"
             if [[ -n "${{ github.event.inputs.commit_message }}" ]]; then
