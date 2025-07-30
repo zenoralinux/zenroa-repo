@@ -1,12 +1,16 @@
-name: Update Arch Repo DB Only (fixed tag, multi-arch)
+name: Update Arch Repo DB Only (fixed per-arch tags)
 
 on:
   workflow_dispatch:
     inputs:
       repo_name:
-        description: "Pacman repo/db name (must match client pacman.conf section)"
+        description: "Pacman repo/db name (must match clients' pacman.conf section)"
         required: true
         default: "zrepo"
+      repo_slug:
+        description: "Target GitHub repo (owner/name) that hosts the releases"
+        required: true
+        default: "zenoralinux/zenroa-repo"
   schedule:
     - cron: "30 3 * * *"  # 03:30 UTC daily
 
@@ -30,8 +34,11 @@ jobs:
 
     env:
       REPO_NAME: ${{ github.event.inputs.repo_name }}
+      REPO_SLUG: ${{ github.event.inputs.repo_slug }}
       ARCH_DIR: ${{ matrix.arch_dir }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # برای gh لازم است
+      # اگر Cross-repo است، بهتر است PAT با scope=repo بدهید؛
+      # در غیر این صورت GITHUB_TOKEN هم کفایت می‌کند وقتی ورکفلو در همان ریپو اجرا شود.
+      GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Install base tools (inside Arch container)
@@ -40,81 +47,80 @@ jobs:
           pacman -Syu --noconfirm --needed git base-devel libarchive ca-certificates github-cli jq
           update-ca-trust
 
-      - name: Checkout this repo (for workspace)
+      - name: Checkout (workspace)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Prepare workspace
+      - name: Ensure target release tag exists (must be x86_64/aarch64)
+        run: |
+          set -euo pipefail
+          if ! gh release view -R "$REPO_SLUG" "$ARCH_DIR" >/dev/null 2>&1; then
+            echo "::error:: Release tag '$ARCH_DIR' not found in $REPO_SLUG"
+            exit 1
+          fi
+          echo "Found release tag '$ARCH_DIR' in $REPO_SLUG"
+
+      - name: Download packages from the arch tag (including any)
+        id: dl
         run: |
           set -euo pipefail
           mkdir -p "repo/$ARCH_DIR"
 
-      # دانلود فقط پکیج‌ها از Release با تگ برابر معماری
-      - name: Download packages from release tag (= arch)
-        id: dl
-        run: |
-          set -euo pipefail
-          # تلاش برای دانلود فقط *.pkg.tar.* از تگ مربوط به معماری
-          if gh release view "$ARCH_DIR" >/dev/null 2>&1; then
-            gh release download "$ARCH_DIR" \
-              --pattern "*.pkg.tar.*" \
-              --dir "repo/$ARCH_DIR" \
-              --clobber || true
-          else
-            echo "No release tag named ${ARCH_DIR} found."
-          fi
+          case "${ARCH_DIR}" in
+            x86_64) arch_pattern="*-x86_64.pkg.tar.*" ;;
+            aarch64) arch_pattern="*-aarch64.pkg.tar.*" ;;
+            *) arch_pattern="*-${ARCH_DIR}.pkg.tar.*" ;;
+          esac
 
-          # چک وجود پکیج‌ها
+          echo "Downloading arch-specific packages: ${arch_pattern}"
+          gh release download -R "$REPO_SLUG" "$ARCH_DIR" --pattern "${arch_pattern}" --dir "repo/$ARCH_DIR" --clobber || true
+
+          echo "Downloading any-arch packages: *-any.pkg.tar.*"
+          gh release download -R "$REPO_SLUG" "$ARCH_DIR" --pattern "*-any.pkg.tar.*" --dir "repo/$ARCH_DIR" --clobber || true
+
           shopt -s nullglob
           pkgs=( repo/"$ARCH_DIR"/*.pkg.tar.* )
           if [ ${#pkgs[@]} -eq 0 ]; then
             echo "no_pkgs=true" >> "$GITHUB_OUTPUT"
-            echo "No package files found in release ${ARCH_DIR}. Skipping DB build."
+            echo "::error:: No packages (*.pkg.tar.*) found under tag '$ARCH_DIR' in $REPO_SLUG"
+            exit 1
           else
             echo "no_pkgs=false" >> "$GITHUB_OUTPUT"
+            echo "Downloaded ${#pkgs[@]} packages:"
+            (cd repo/"$ARCH_DIR" && ls -lh *.pkg.tar.*)
           fi
 
       - name: Build pacman database (repo-add)
-        if: steps.dl.outputs.no_pkgs == 'false'
         id: builddb
         run: |
           set -euo pipefail
           cd "repo/$ARCH_DIR"
-
-          # پاکسازی نسخه‌های قبلی دیتابیس داخل workspace
           rm -f "$REPO_NAME".db* "$REPO_NAME".files*
-
-          # ساخت دیتابیس
           repo-add -n -R "$REPO_NAME".db.tar.gz ./*.pkg.tar.*
-
-          # نگه داشتن کپی بدون پسوند tar.gz (بدون symlink)
           mv -f "$REPO_NAME".db.tar.gz    "$REPO_NAME".db
           mv -f "$REPO_NAME".files.tar.gz "$REPO_NAME".files
-
-          echo "== DB outputs =="
           ls -lh "$REPO_NAME".db "$REPO_NAME".files
 
-      - name: List repo outputs
-        if: steps.dl.outputs.no_pkgs == 'false'
+      - name: Delete old DB assets if exist (safe replace)
         run: |
-          set -e
-          echo "---- repo tree ----"
-          ls -lahR repo || true
-          echo "---- expected DB files in repo/$ARCH_DIR ----"
-          ls -l "repo/$ARCH_DIR/$REPO_NAME".db "repo/$ARCH_DIR/$REPO_NAME".files
+          set -euo pipefail
+          for asset in "${REPO_NAME}.db" "${REPO_NAME}.files"; do
+            asset_id=$(gh release view -R "$REPO_SLUG" "$ARCH_DIR" --json assets \
+              --jq ".assets[] | select(.name==\"${asset}\") | .id" || true)
+            if [ -n "$asset_id" ]; then
+              echo "Deleting existing asset ${asset} (id=${asset_id}) from tag ${ARCH_DIR}"
+              gh api \
+                -X DELETE \
+                -H "Accept: application/vnd.github+json" \
+                "repos/${REPO_SLUG}/releases/assets/${asset_id}"
+            fi
+          done
 
-      # آپلود فقط فایل‌های DB به همان تگ (برابر معماری)
-      - name: Upload DB assets to fixed tag per arch
-        if: steps.dl.outputs.no_pkgs == 'false'
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ env.ARCH_DIR }}
-          release_name: "Package repository (rolling) ${{ env.ARCH_DIR }}"
-          body: "Automated DB update for ${{ env.REPO_NAME }} / ${{ env.ARCH_DIR }}"
-          file_glob: false
-          overwrite: true
-          file: |
-            ${{ github.workspace }}/repo/${{ env.ARCH_DIR }}/${{ env.REPO_NAME }}.db
-            ${{ github.workspace }}/repo/${{ env.ARCH_DIR }}/${{ env.REPO_NAME }}.files
+      - name: Upload new DB assets to the same tag
+        run: |
+          set -euo pipefail
+          gh release upload -R "$REPO_SLUG" "$ARCH_DIR" \
+            "repo/${ARCH_DIR}/${REPO_NAME}.db" \
+            "repo/${ARCH_DIR}/${REPO_NAME}.files"
+          echo "Uploaded ${REPO_NAME}.db and ${REPO_NAME}.files to tag ${ARCH_DIR} in ${REPO_SLUG}"
