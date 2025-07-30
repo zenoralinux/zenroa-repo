@@ -1,124 +1,88 @@
-name: Publish Arch Repo to GitHub Releases (fixed tag, multi-arch)
+name: Update Arch Repo DB Only
 
 on:
   workflow_dispatch:
     inputs:
-      source_repo_url:
-        description: "Upstream repo with built packages (e.g., Codeberg)"
-        required: true
-        default: "https://codeberg.org/zenoralinux/zenora-repo.git"
-      source_branch:
-        description: "Source branch"
-        required: true
-        default: "main"
       repo_name:
         description: "Pacman repo/db name (MUST match pacman.conf section on clients)"
         required: true
         default: "zrepo"
       release_tag:
-        description: "Base release tag to upload assets to (will append arch)"
+        description: "Release tag to download packages from (usually arch name)"
         required: true
-        default: "repository"
-  schedule:
-    - cron: "30 3 * * *"    # 03:30 UTC daily
+        default: "x86_64"
 
 permissions:
   contents: write
 
 concurrency:
-  group: publish-arch-repo
+  group: update-db-only
   cancel-in-progress: false
 
 jobs:
-  publish:
+  update-db:
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
 
-    strategy:
-      fail-fast: false
-      matrix:
-        arch_dir: [x86_64, aarch64]
-
     env:
       REPO_NAME: ${{ github.event.inputs.repo_name }}
-      SRC_URL: ${{ github.event.inputs.source_repo_url }}
-      SRC_BRANCH: ${{ github.event.inputs.source_branch }}
-      RELEASE_TAG_BASE: ${{ github.event.inputs.release_tag }}
-      ARCH_DIR: ${{ matrix.arch_dir }}
+      RELEASE_TAG: ${{ github.event.inputs.release_tag }}
 
     steps:
-      - name: Install base tools (inside Arch container)
+      - name: Install base tools
         run: |
-          set -eux
-          pacman -Syu --noconfirm --needed git base-devel libarchive ca-certificates
-          update-ca-trust
+          pacman -Syu --noconfirm --needed git base-devel libarchive wget
 
       - name: Checkout this repo
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Fetch source packages
+      - name: Download current packages from release
         run: |
           set -eux
-          git clone --depth 1 --branch "$SRC_BRANCH" "$SRC_URL" src
-          test -d "src" && ls -la src || true
-          test -d "src/$ARCH_DIR" && ls -la "src/$ARCH_DIR" || echo "No src/$ARCH_DIR folder."
+          mkdir -p "repo/$RELEASE_TAG"
+          cd "repo/$RELEASE_TAG"
+          
+          # Download current release assets
+          gh release download "$RELEASE_TAG" \
+            --pattern "*.pkg.tar.*" \
+            --dir "." \
+            --clobber
 
-      - name: Prepare repo structure
+      - name: Rebuild database
         run: |
           set -euo pipefail
-          mkdir -p "repo/$ARCH_DIR"
-          if compgen -G "src/$ARCH_DIR/*.pkg.tar.*" > /dev/null; then
-            cp -f src/$ARCH_DIR/*.pkg.tar.* "repo/$ARCH_DIR/" || true
-          fi
-
-      - name: Build pacman database (only .db)
-        id: builddb
-        run: |
-          set -euo pipefail
-          cd "repo/$ARCH_DIR"
+          cd "repo/$RELEASE_TAG"
 
           shopt -s nullglob
           pkgs=( *.pkg.tar.* )
 
           if [ ${#pkgs[@]} -eq 0 ]; then
-            echo "No packages found for $ARCH_DIR. Skipping DB build for this arch."
-            echo "has_files=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "No packages found. Exiting."
+            exit 1
           fi
 
+          # Remove old DB files
           rm -f "$REPO_NAME".db* "$REPO_NAME".files*
 
-          # Build DB only
+          # Build new DB
           repo-add -n -R "$REPO_NAME".db.tar.gz "${pkgs[@]}"
 
-          # Keep compressed copy (no symlink)
+          # Keep both compressed and uncompressed copies
           mv -f "$REPO_NAME".db.tar.gz    "$REPO_NAME".db
+          mv -f "$REPO_NAME".files.tar.gz "$REPO_NAME".files
 
-          echo "== DB outputs =="
-          ls -lh "$REPO_NAME".db*
+          echo "== New DB files =="
+          ls -lh "$REPO_NAME".db* "$REPO_NAME".files*
 
-          echo "has_files=true" >> "$GITHUB_OUTPUT"
-
-      - name: List repo outputs
-        run: |
-          set -e
-          echo "Workspace: $GITHUB_WORKSPACE"
-          echo "---- repo tree ----"
-          ls -lahR repo || true
-          echo "---- expected files in repo/$ARCH_DIR ----"
-          find "repo/$ARCH_DIR" -maxdepth 1 -type f -print || true
-
-      - name: Upload assets to fixed tag per arch
-        if: steps.builddb.outputs.has_files == 'true'
+      - name: Upload updated DB files
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ env.ARCH_DIR }}
-          release_name: "Package repository (rolling) ${{ env.ARCH_DIR }}"
-          body: "Automated publish for ${{ env.REPO_NAME }} / ${{ env.ARCH_DIR }} - Updated only DB"
+          tag: ${{ env.RELEASE_TAG }}
+          release_name: "Package repository (rolling) ${{ env.RELEASE_TAG }}"
+          body: "Automated DB update for ${{ env.REPO_NAME }} / ${{ env.RELEASE_TAG }}"
           file_glob: true
           overwrite: true
-          file: ${{ github.workspace }}/repo/${{ env.ARCH_DIR }}/$REPO_NAME.db
+          file: ${{ github.workspace }}/repo/${{ env.RELEASE_TAG }}/${{ env.REPO_NAME }}.db*
+          file: ${{ github.workspace }}/repo/${{ env.RELEASE_TAG }}/${{ env.REPO_NAME }}.files*
