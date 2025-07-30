@@ -1,28 +1,36 @@
-name: Update Arch Repo DB Only (fixed per-arch tags)
+name: Publish Arch Repo to GitHub Releases (fixed tag, multi-arch)
 
 on:
   workflow_dispatch:
     inputs:
+      source_repo_url:
+        description: "Upstream repo with built packages (e.g., Codeberg)"
+        required: true
+        default: "https://codeberg.org/zenoralinux/zenora-repo.git"
+      source_branch:
+        description: "Source branch"
+        required: true
+        default: "main"
       repo_name:
-        description: "Pacman repo/db name (must match clients' pacman.conf section)"
+        description: "Pacman repo/db name (MUST match pacman.conf section on clients)"
         required: true
         default: "zrepo"
-      repo_slug:
-        description: "Target GitHub repo (owner/name) that hosts the releases"
+      release_tag:
+        description: "Base release tag to upload assets to (will append arch)"
         required: true
-        default: "zenoralinux/zenroa-repo"
+        default: "repository"
   schedule:
-    - cron: "30 3 * * *"  # 03:30 UTC daily
+    - cron: "30 3 * * *"    # 03:30 UTC daily
 
 permissions:
   contents: write
 
 concurrency:
-  group: update-arch-repo-db
+  group: publish-arch-repo
   cancel-in-progress: false
 
 jobs:
-  update-db:
+  publish:
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
@@ -34,93 +42,83 @@ jobs:
 
     env:
       REPO_NAME: ${{ github.event.inputs.repo_name }}
-      REPO_SLUG: ${{ github.event.inputs.repo_slug }}
+      SRC_URL: ${{ github.event.inputs.source_repo_url }}
+      SRC_BRANCH: ${{ github.event.inputs.source_branch }}
+      RELEASE_TAG_BASE: ${{ github.event.inputs.release_tag }}
       ARCH_DIR: ${{ matrix.arch_dir }}
-      # اگر Cross-repo است، بهتر است PAT با scope=repo بدهید؛
-      # در غیر این صورت GITHUB_TOKEN هم کفایت می‌کند وقتی ورکفلو در همان ریپو اجرا شود.
-      GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Install base tools (inside Arch container)
         run: |
           set -eux
-          pacman -Syu --noconfirm --needed git base-devel libarchive ca-certificates github-cli jq
+          pacman -Syu --noconfirm --needed git base-devel libarchive ca-certificates
           update-ca-trust
 
-      - name: Checkout (workspace)
+      - name: Checkout this repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Ensure target release tag exists (must be x86_64/aarch64)
+      - name: Fetch source packages
         run: |
-          set -euo pipefail
-          if ! gh release view -R "$REPO_SLUG" "$ARCH_DIR" >/dev/null 2>&1; then
-            echo "::error:: Release tag '$ARCH_DIR' not found in $REPO_SLUG"
-            exit 1
-          fi
-          echo "Found release tag '$ARCH_DIR' in $REPO_SLUG"
+          set -eux
+          git clone --depth 1 --branch "$SRC_BRANCH" "$SRC_URL" src
+          test -d "src" && ls -la src || true
+          test -d "src/$ARCH_DIR" && ls -la "src/$ARCH_DIR" || echo "No src/$ARCH_DIR folder."
 
-      - name: Download packages from the arch tag (including any)
-        id: dl
+      - name: Prepare repo structure
         run: |
           set -euo pipefail
           mkdir -p "repo/$ARCH_DIR"
-
-          case "${ARCH_DIR}" in
-            x86_64) arch_pattern="*-x86_64.pkg.tar.*" ;;
-            aarch64) arch_pattern="*-aarch64.pkg.tar.*" ;;
-            *) arch_pattern="*-${ARCH_DIR}.pkg.tar.*" ;;
-          esac
-
-          echo "Downloading arch-specific packages: ${arch_pattern}"
-          gh release download -R "$REPO_SLUG" "$ARCH_DIR" --pattern "${arch_pattern}" --dir "repo/$ARCH_DIR" --clobber || true
-
-          echo "Downloading any-arch packages: *-any.pkg.tar.*"
-          gh release download -R "$REPO_SLUG" "$ARCH_DIR" --pattern "*-any.pkg.tar.*" --dir "repo/$ARCH_DIR" --clobber || true
-
-          shopt -s nullglob
-          pkgs=( repo/"$ARCH_DIR"/*.pkg.tar.* )
-          if [ ${#pkgs[@]} -eq 0 ]; then
-            echo "no_pkgs=true" >> "$GITHUB_OUTPUT"
-            echo "::error:: No packages (*.pkg.tar.*) found under tag '$ARCH_DIR' in $REPO_SLUG"
-            exit 1
-          else
-            echo "no_pkgs=false" >> "$GITHUB_OUTPUT"
-            echo "Downloaded ${#pkgs[@]} packages:"
-            (cd repo/"$ARCH_DIR" && ls -lh *.pkg.tar.*)
+          if compgen -G "src/$ARCH_DIR/*.pkg.tar.*" > /dev/null; then
+            cp -f src/$ARCH_DIR/*.pkg.tar.* "repo/$ARCH_DIR/" || true
           fi
 
-      - name: Build pacman database (repo-add)
+      - name: Build pacman database (only .db)
         id: builddb
         run: |
           set -euo pipefail
           cd "repo/$ARCH_DIR"
+
+          shopt -s nullglob
+          pkgs=( *.pkg.tar.* )
+
+          if [ ${#pkgs[@]} -eq 0 ]; then
+            echo "No packages found for $ARCH_DIR. Skipping DB build for this arch."
+            echo "has_files=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           rm -f "$REPO_NAME".db* "$REPO_NAME".files*
-          repo-add -n -R "$REPO_NAME".db.tar.gz ./*.pkg.tar.*
+
+          # Build DB only
+          repo-add -n -R "$REPO_NAME".db.tar.gz "${pkgs[@]}"
+
+          # Keep compressed copy (no symlink)
           mv -f "$REPO_NAME".db.tar.gz    "$REPO_NAME".db
-          mv -f "$REPO_NAME".files.tar.gz "$REPO_NAME".files
-          ls -lh "$REPO_NAME".db "$REPO_NAME".files
 
-      - name: Delete old DB assets if exist (safe replace)
-        run: |
-          set -euo pipefail
-          for asset in "${REPO_NAME}.db" "${REPO_NAME}.files"; do
-            asset_id=$(gh release view -R "$REPO_SLUG" "$ARCH_DIR" --json assets \
-              --jq ".assets[] | select(.name==\"${asset}\") | .id" || true)
-            if [ -n "$asset_id" ]; then
-              echo "Deleting existing asset ${asset} (id=${asset_id}) from tag ${ARCH_DIR}"
-              gh api \
-                -X DELETE \
-                -H "Accept: application/vnd.github+json" \
-                "repos/${REPO_SLUG}/releases/assets/${asset_id}"
-            fi
-          done
+          echo "== DB outputs =="
+          ls -lh "$REPO_NAME".db*
 
-      - name: Upload new DB assets to the same tag
+          echo "has_files=true" >> "$GITHUB_OUTPUT"
+
+      - name: List repo outputs
         run: |
-          set -euo pipefail
-          gh release upload -R "$REPO_SLUG" "$ARCH_DIR" \
-            "repo/${ARCH_DIR}/${REPO_NAME}.db" \
-            "repo/${ARCH_DIR}/${REPO_NAME}.files"
-          echo "Uploaded ${REPO_NAME}.db and ${REPO_NAME}.files to tag ${ARCH_DIR} in ${REPO_SLUG}"
+          set -e
+          echo "Workspace: $GITHUB_WORKSPACE"
+          echo "---- repo tree ----"
+          ls -lahR repo || true
+          echo "---- expected files in repo/$ARCH_DIR ----"
+          find "repo/$ARCH_DIR" -maxdepth 1 -type f -print || true
+
+      - name: Upload assets to fixed tag per arch
+        if: steps.builddb.outputs.has_files == 'true'
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ env.ARCH_DIR }}
+          release_name: "Package repository (rolling) ${{ env.ARCH_DIR }}"
+          body: "Automated publish for ${{ env.REPO_NAME }} / ${{ env.ARCH_DIR }} - Updated only DB"
+          file_glob: true
+          overwrite: true
+          file: ${{ github.workspace }}/repo/${{ env.ARCH_DIR }}/$REPO_NAME.db
