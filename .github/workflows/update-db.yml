@@ -84,5 +84,4 @@ jobs:
           body: "Automated DB update for ${{ env.REPO_NAME }} / ${{ env.RELEASE_TAG }}"
           file_glob: true
           overwrite: true
-          file: ${{ github.workspace }}/repo/${{ env.RELEASE_TAG }}/${{ env.REPO_NAME }}.db*
-          file: ${{ github.workspace }}/repo/${{ env.RELEASE_TAG }}/${{ env.REPO_NAME }}.files*
+          file: ${{ github.workspace }}/repo/${{ env.RELEASE_TAG }}/${{ env.REPO_NAME }}.*
