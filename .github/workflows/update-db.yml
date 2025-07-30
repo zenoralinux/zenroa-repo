@@ -30,12 +30,16 @@ jobs:
       RELEASE_TAG: ${{ github.event.inputs.release_tag }}
 
     steps:
-      - name: Install base tools
+      - name: Install base tools (including gh CLI)
         run: |
-          pacman -Syu --noconfirm --needed git base-devel libarchive wget
+          pacman -Syu --noconfirm --needed git base-devel libarchive wget github-cli
 
       - name: Checkout this repo
         uses: actions/checkout@v4
+
+      - name: Authenticate gh CLI
+        run: |
+          gh auth login --with-token <<< "${{ secrets.GITHUB_TOKEN }}"
 
       - name: Download current packages from release
         run: |
@@ -43,7 +47,6 @@ jobs:
           mkdir -p "repo/$RELEASE_TAG"
           cd "repo/$RELEASE_TAG"
           
-          # Download current release assets
           gh release download "$RELEASE_TAG" \
             --pattern "*.pkg.tar.*" \
             --dir "." \
@@ -62,18 +65,10 @@ jobs:
             exit 1
           fi
 
-          # Remove old DB files
           rm -f "$REPO_NAME".db* "$REPO_NAME".files*
-
-          # Build new DB
           repo-add -n -R "$REPO_NAME".db.tar.gz "${pkgs[@]}"
-
-          # Keep both compressed and uncompressed copies
           mv -f "$REPO_NAME".db.tar.gz    "$REPO_NAME".db
           mv -f "$REPO_NAME".files.tar.gz "$REPO_NAME".files
-
-          echo "== New DB files =="
-          ls -lh "$REPO_NAME".db* "$REPO_NAME".files*
 
       - name: Upload updated DB files
         uses: svenstaro/upload-release-action@v2
