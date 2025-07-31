@@ -89,10 +89,10 @@ jobs:
         if: steps.download.outputs.has_packages == 'true'
         uses: softprops/action-gh-release@v1
         with:
-          tag: ${{ env.ARCH_DIR }}
+          tag_name: ${{ env.ARCH_DIR }}  # تغییر از tag به tag_name
           files: |
             repo/${{ env.ARCH_DIR }}/${{ env.REPO_NAME }}.db
             repo/${{ env.ARCH_DIR }}/${{ env.REPO_NAME }}.files
           repository: ${{ github.repository }}
           token: ${{ secrets.GITHUB_TOKEN }}
-          overwrite: true
+          overwrite: true  # این پارامتر در نسخه جدیدتر پشتیبانی می‌شود
