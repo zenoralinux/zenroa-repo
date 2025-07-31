@@ -36,13 +36,30 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download packages from release
+        id: download
         run: |
           mkdir -p "repo/$ARCH_DIR"
           cd "repo/$ARCH_DIR"
           
-          # Get download URLs for packages
+          echo "Checking release for $ARCH_DIR..."
           api_url="https://api.github.com/repos/${{ github.repository }}/releases/tags/$ARCH_DIR"
-          assets=$(curl -sH "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "$api_url" | jq -r '.assets[] | select(.name | endswith(".pkg.tar.zst")) | .url')
+          response=$(curl -sH "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "$api_url")
+          
+          # Debug: Show response
+          echo "API Response:"
+          echo "$response" | jq .
+          
+          # Get package assets
+          assets=$(echo "$response" | jq -r '.assets[] | select(.name | test("\\.pkg\\.tar\\.(zst|xz|gz)$")) | .url')
+          
+          if [ -z "$assets" ]; then
+            echo "::warning::No package assets found in release for $ARCH_DIR"
+            echo "has_packages=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "Found packages:"
+          echo "$assets"
           
           for asset_url in $assets; do
             echo "Downloading $asset_url"
@@ -50,31 +67,26 @@ jobs:
                  -H "Accept: application/octet-stream" \
                  "$asset_url" -O
           done
+          
+          echo "has_packages=true" >> $GITHUB_OUTPUT
 
       - name: Build pacman database
-        id: builddb
+        if: steps.download.outputs.has_packages == 'true'
         run: |
           set -euo pipefail
           cd "repo/$ARCH_DIR"
+          ls -la
 
           rm -f "$REPO_NAME".db* "$REPO_NAME".files*
           shopt -s nullglob
           pkgs=( *.pkg.tar.* )
 
-          if [ ${#pkgs[@]} -eq 0 ]; then
-            echo "No packages found for $ARCH_DIR."
-            echo "has_packages=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
           repo-add -n -R "$REPO_NAME".db.tar.gz "${pkgs[@]}"
           mv -f "$REPO_NAME".db.tar.gz "$REPO_NAME".db
           mv -f "$REPO_NAME".files.tar.gz "$REPO_NAME".files
 
-          echo "has_packages=true" >> "$GITHUB_OUTPUT"
-
-      - name: Upload only database files to release
-        if: steps.builddb.outputs.has_packages == 'true'
+      - name: Upload database files
+        if: steps.download.outputs.has_packages == 'true'
         uses: softprops/action-gh-release@v1
         with:
           tag: ${{ env.ARCH_DIR }}
