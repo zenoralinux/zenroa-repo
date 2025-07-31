@@ -1,43 +1,86 @@
-name: Update Repository DB
+name: Update Repo Databases
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *' # روزانه اجرا شود
+    - cron: "30 3 * * *"  # روزانه در 03:30 UTC اجرا شود
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-repo-dbs
+  cancel-in-progress: false
 
 jobs:
   update-db:
     runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+
     strategy:
+      fail-fast: false
       matrix:
         arch: [x86_64, aarch64]
+
+    env:
+      REPO_NAME: "zenroa-repo"
+      ARCH_DIR: ${{ matrix.arch }}
+
     steps:
-      - name: Checkout repository
+      - name: Install required tools
+        run: |
+          pacman -Syu --noconfirm --needed pacman-contrib libarchive
+
+      - name: Checkout current repo
         uses: actions/checkout@v4
 
-      - name: Install required packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pacman repo-elephant
-
       - name: Download packages from release
-        uses: actions/download-artifact@v3
-        with:
-          name: ${{ matrix.arch }}-packages
-          path: ./${{ matrix.arch }}
-
-      - name: Create repository directory structure
         run: |
-          mkdir -p ./${{ matrix.arch }}/repo
-          mv ./${{ matrix.arch }}/*.pkg.tar.* ./${{ matrix.arch }}/repo/
-          cd ./${{ matrix.arch }}/repo
-          repo-elephant --add .
+          mkdir -p "repo/$ARCH_DIR"
+          gh release download "$ARCH_DIR" \
+            --pattern "*.pkg.tar.*" \
+            --dir "repo/$ARCH_DIR" \
+            --repo ${{ github.repository }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload DB to release
-        uses: ncipollo/release-action@v1
+      - name: Build pacman database
+        id: builddb
+        run: |
+          set -euo pipefail
+          cd "repo/$ARCH_DIR"
+
+          # Remove existing db files if any
+          rm -f "$REPO_NAME".db* "$REPO_NAME".files*
+
+          # Get all package files
+          shopt -s nullglob
+          pkgs=( *.pkg.tar.* )
+
+          if [ ${#pkgs[@]} -eq 0 ]; then
+            echo "No packages found for $ARCH_DIR."
+            echo "has_packages=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Create new database
+          repo-add -n -R "$REPO_NAME".db.tar.gz "${pkgs[@]}"
+
+          # Rename files to expected format
+          mv -f "$REPO_NAME".db.tar.gz "$REPO_NAME".db
+          mv -f "$REPO_NAME".files.tar.gz "$REPO_NAME".files
+
+          echo "has_packages=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload only database files to release
+        if: steps.builddb.outputs.has_packages == 'true'
+        uses: softprops/action-gh-release@v1
         with:
-          artifacts: "./${{ matrix.arch }}/repo/*.db*"
+          tag: ${{ env.ARCH_DIR }}
+          files: |
+            repo/${{ env.ARCH_DIR }}/${{ env.REPO_NAME }}.db
+            repo/${{ env.ARCH_DIR }}/${{ env.REPO_NAME }}.files
+          repository: ${{ github.repository }}
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ matrix.arch }}
-          replacesArtifacts: true
-          artifactErrorsFailBuild: false
+          overwrite: true
