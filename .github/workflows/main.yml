@@ -37,14 +37,11 @@ jobs:
       - name: Checkout this repo
         uses: actions/checkout@v4
 
-      - name: Fix git ownership
+      - name: Setup GitHub CLI
         run: |
           git config --global --add safe.directory /__w/zenroa-repo/zenroa-repo
+          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
           gh auth setup-git
-
-      - name: Authenticate gh CLI
-        run: |
-          gh auth login --with-token <<< "${{ secrets.GITHUB_TOKEN }}"
 
       - name: Download current packages from release
         run: |
