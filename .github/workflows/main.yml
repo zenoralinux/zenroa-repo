@@ -3,7 +3,7 @@ name: Update Repo Databases
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 3 * * *"  # روزانه در 03:30 UTC اجرا شود
+    - cron: "30 3 * * *"
 
 permissions:
   contents: write
@@ -30,7 +30,7 @@ jobs:
     steps:
       - name: Install required tools
         run: |
-          pacman -Syu --noconfirm --needed pacman-contrib libarchive
+          pacman -Syu --noconfirm --needed pacman-contrib libarchive curl jq
 
       - name: Checkout current repo
         uses: actions/checkout@v4
@@ -38,12 +38,18 @@ jobs:
       - name: Download packages from release
         run: |
           mkdir -p "repo/$ARCH_DIR"
-          gh release download "$ARCH_DIR" \
-            --pattern "*.pkg.tar.*" \
-            --dir "repo/$ARCH_DIR" \
-            --repo ${{ github.repository }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          cd "repo/$ARCH_DIR"
+          
+          # Get download URLs for packages
+          api_url="https://api.github.com/repos/${{ github.repository }}/releases/tags/$ARCH_DIR"
+          assets=$(curl -sH "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "$api_url" | jq -r '.assets[] | select(.name | endswith(".pkg.tar.zst")) | .url')
+          
+          for asset_url in $assets; do
+            echo "Downloading $asset_url"
+            curl -sLH "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                 -H "Accept: application/octet-stream" \
+                 "$asset_url" -O
+          done
 
       - name: Build pacman database
         id: builddb
@@ -51,10 +57,7 @@ jobs:
           set -euo pipefail
           cd "repo/$ARCH_DIR"
 
-          # Remove existing db files if any
           rm -f "$REPO_NAME".db* "$REPO_NAME".files*
-
-          # Get all package files
           shopt -s nullglob
           pkgs=( *.pkg.tar.* )
 
@@ -64,10 +67,7 @@ jobs:
             exit 0
           fi
 
-          # Create new database
           repo-add -n -R "$REPO_NAME".db.tar.gz "${pkgs[@]}"
-
-          # Rename files to expected format
           mv -f "$REPO_NAME".db.tar.gz "$REPO_NAME".db
           mv -f "$REPO_NAME".files.tar.gz "$REPO_NAME".files
 
