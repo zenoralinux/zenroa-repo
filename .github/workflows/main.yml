@@ -24,7 +24,7 @@ jobs:
         arch: [x86_64, aarch64]
 
     env:
-      REPO_NAME: "zenroa-repo"
+      REPO_NAME: "zrepo"
       ARCH_DIR: ${{ matrix.arch }}
 
     steps:
@@ -75,24 +75,55 @@ jobs:
         run: |
           set -euo pipefail
           cd "repo/$ARCH_DIR"
+          echo "Current directory contents:"
           ls -la
 
+          # Remove existing db files if any
           rm -f "$REPO_NAME".db* "$REPO_NAME".files*
+
+          # Get all package files
           shopt -s nullglob
           pkgs=( *.pkg.tar.* )
+          echo "Found packages: ${pkgs[@]}"
 
+          if [ ${#pkgs[@]} -eq 0 ]; then
+            echo "::error::No package files found in repo/$ARCH_DIR"
+            exit 1
+          fi
+
+          # Create new database
           repo-add -n -R "$REPO_NAME".db.tar.gz "${pkgs[@]}"
-          mv -f "$REPO_NAME".db.tar.gz "$REPO_NAME".db
-          mv -f "$REPO_NAME".files.tar.gz "$REPO_NAME".files
+
+          # Rename files to expected format
+          mv -fv "$REPO_NAME".db.tar.gz "$REPO_NAME".db
+          mv -fv "$REPO_NAME".files.tar.gz "$REPO_NAME".files
+
+          echo "Final directory contents:"
+          ls -la
 
       - name: Upload database files
         if: steps.download.outputs.has_packages == 'true'
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ env.ARCH_DIR }}  # تغییر از tag به tag_name
-          files: |
-            repo/${{ env.ARCH_DIR }}/${{ env.REPO_NAME }}.db
-            repo/${{ env.ARCH_DIR }}/${{ env.REPO_NAME }}.files
-          repository: ${{ github.repository }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          overwrite: true  # این پارامتر در نسخه جدیدتر پشتیبانی می‌شود
+        run: |
+          cd "repo/$ARCH_DIR"
+          echo "Files to upload:"
+          ls -lh
+          
+          # Get release ID
+          release_id=$(curl -sH "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$ARCH_DIR" | \
+            jq -r '.id')
+          echo "Release ID: $release_id"
+          
+          # Upload each file
+          for file in "$REPO_NAME.db" "$REPO_NAME.files"; do
+            echo "Uploading $file..."
+            curl -X POST \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$file" \
+              "https://uploads.github.com/repos/${{ github.repository }}/releases/$release_id/assets?name=$(basename $file)"
+            
+            # Verify upload
+            echo "Verifying upload..."
+            curl -I "https://github.com/${{ github.repository }}/releases/download/$ARCH_DIR/$(basename $file)"
+          done
