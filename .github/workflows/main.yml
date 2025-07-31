@@ -1,60 +1,43 @@
-name: Build & Upload Repo DB
+name: Update Repository DB
 
 on:
   workflow_dispatch:
-    inputs:
-      arch:
-        description: 'Architecture (x86_64 or aarch64)'
-        required: true
-        default: 'x86_64'
+  schedule:
+    - cron: '0 0 * * *' # روزانه اجرا شود
 
 jobs:
-  make-db:
+  update-db:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare variables
-        id: vars
+      - name: Install required packages
         run: |
-          ARCH="${{ github.event.inputs.arch }}"
-          PKG_DIR="pkgs/${ARCH}"
-          DB_FILE="zenroa.db.tar.gz"
-          echo "arch=$ARCH" >> $GITHUB_OUTPUT
-          echo "pkg_dir=$PKG_DIR" >> $GITHUB_OUTPUT
-          echo "db_file=$DB_FILE" >> $GITHUB_OUTPUT
+          sudo apt-get update
+          sudo apt-get install -y pacman repo-elephant
 
-      - name: Install tools
-        run: |
-          sudo apt update
-          sudo apt install -y binutils fakeroot tar zstd
+      - name: Download packages from release
+        uses: actions/download-artifact@v3
+        with:
+          name: ${{ matrix.arch }}-packages
+          path: ./${{ matrix.arch }}
 
-      - name: Generate database
+      - name: Create repository directory structure
         run: |
-          cd ${{ steps.vars.outputs.pkg_dir }}
-          repo-add -n -R ../${{ steps.vars.outputs.db_file }} *.pkg.tar.zst
+          mkdir -p ./${{ matrix.arch }}/repo
+          mv ./${{ matrix.arch }}/*.pkg.tar.* ./${{ matrix.arch }}/repo/
+          cd ./${{ matrix.arch }}/repo
+          repo-elephant --add .
 
-      - name: Get release id
-        id: getrel
-        run: |
-          RELEASE_ID=$(gh api repos/${{ github.repository }}/releases/tags/${{ steps.vars.outputs.arch }} --jq '.id')
-          echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
-
-      - name: Remove old asset if exists
-        continue-on-error: true
-        run: |
-          ASSET=$(gh api repos/${{ github.repository }}/releases/${{ steps.getrel.outputs.release_id }}/assets --jq '.[] | select(.name=="'${{ steps.vars.outputs.db_file }}'") | .id')
-          if [[ -n "$ASSET" ]]; then
-            gh api --method DELETE repos/${{ github.repository }}/releases/assets/$ASSET
-          fi
-
-      - name: Upload new db asset
-        run: |
-          gh release upload ${{ steps.vars.outputs.arch }} ${{ steps.vars.outputs.db_file }} --clobber
+      - name: Upload DB to release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "./${{ matrix.arch }}/repo/*.db*"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ matrix.arch }}
+          replacesArtifacts: true
+          artifactErrorsFailBuild: false
